@@ -17,7 +17,6 @@
 #include <thread>
 #include <cstdlib>
 #include <cstdio>
-
 #include <string>
 #include <fstream>
 
@@ -174,6 +173,38 @@ int read_file(std::string file_name, std::vector<int>& field, int* row_count, in
 
 void print_field(std::vector<int>& field, int row_length) {
   for (int i = 0; i < field.size(); i++) {
+    printf("%d", field[i]);
+    if (i % row_length == row_length - 1) printf("\n");
+  }
+}
+
+void print_field_ranks(std::vector<int>& field, int row_length, std::vector<int>& counts) {
+  int currrent_rank = 0;
+  std::vector<int> ranks;
+  for (int i = 0; i < counts.size(); i++) {
+    for (int r = 0; r < counts[i]; r += row_length) {
+      ranks.push_back(currrent_rank);
+    }
+    currrent_rank++;
+  }
+#if DBG
+  printf("counts: ");
+  for (int i = 0; i < counts.size(); i++) {
+    printf("%d, ", counts[i]);
+  }
+  printf("\n");
+
+  printf("row length: %d\n", row_length);
+
+  printf("ranks: ");
+  for (int i = 0; i < ranks.size(); i++) {
+    printf("%d, ", ranks[i]);
+  }
+  printf("\n");
+#endif
+
+  for (int i = 0; i < field.size(); i++) {
+    if (i % row_length == 0) printf("%d: ", ranks[i / row_length]);
     printf("%d", field[i]);
     if (i % row_length == row_length - 1) printf("\n");
   }
@@ -363,8 +394,13 @@ int main(int argc, char** argv) {
   MPI_Gatherv(local_rows.data() + row_length, counts[rank], MPI_INT, field.data(), counts.data(), displacements.data(), MPI_INT, MPI_ROOT_RANK, MPI_COMM_WORLD);
 
   if (rank == MPI_ROOT_RANK) {
-    print_field(field, row_length);
+    print_field_ranks(field, row_length, counts);
   }
+  // printf("counts: ");
+  // for (int i = 0; i < counts.size(); i++) {
+  //   printf("%d, ", counts[i]);
+  // }
+  // printf("\n");
 
   MPI_Finalize();
 }
