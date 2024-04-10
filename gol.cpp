@@ -36,71 +36,36 @@ constexpr int FROM_BELLOW_REQUEST = 3;
 
 constexpr int COMM_OVERLAY_THRESHOLD = 5;
 
-#define ABOVE_RANK (rank - 1)
-#define BELLOW_RANK (rank + 1)
+#define ABOVE_RANK ((rank - 1 + size) % size)
+#define BELLOW_RANK ((rank + 1) % size)
 
 #define MPI_ROOT_RANK 0
 
-#define DBG 0
-
-int mpiGetCommRank(MPI_Comm comm) {
-  int rank{};
-  MPI_Comm_rank(MPI_COMM_WORLD, &rank);
-  return rank;
-}
-
-int mpiGetCommSize(MPI_Comm comm) {
-  int size{};
-  MPI_Comm_size(MPI_COMM_WORLD, &size);
-  return size;
-}
-
 int sum_neighbours(std::vector<int>& rs, int idx, int my_counts, int row_length) {
   int sum = 0;
-  int m = idx % row_length;
-#if DBG
-  if (mpiGetCommRank(MPI_COMM_WORLD) == 0) {
-    if (idx == 4) {
-      // look above
-      if (rs[idx - row_length]) printf("above\n");
-      // look bellow
-      if (rs[idx + row_length]) printf("bellow\n");
-      // look left
-      if (m > 0 && rs[idx - 1]) printf("left\n");
-      // look above left
-      if (m > 0 && rs[idx - row_length - 1]) printf("above left\n");
-      // look above right
-      if ((m != row_length - 1) && rs[idx - row_length + 1]) printf("above right\n");
-      // look right
-      if ((m != row_length - 1) && rs[idx + 1]) printf("right\n");
-      // look bellow left
-      if (m > 0 && rs[idx + row_length - 1]) printf("bellow left\n");
-      // look bellow right
-      if ((m != row_length - 1) && rs[idx + row_length + 1]) printf("bellow right\n");
+  int x = idx % row_length;
+  int y = idx / row_length;
+  int nx, ny;
+  int field_length = (my_counts / row_length) + 2;
+
+  for (int dx = -1; dx <= 1; dx++) {
+    for (int dy = -1; dy <= 1; dy++) {
+      // skip the current cell
+      if (!dx && !dy) continue;
+      nx = x + dx, ny = y + dy;
+
+      // wrap around the x coordinate, y coordinate does not need wrap is there is always the neighbors' line
+      if (nx > row_length - 1 || nx < 0) {
+        nx = ((nx % row_length) + row_length) % row_length;
+      }
+      sum += rs[ny * row_length + nx];
     }
   }
-#endif
-  // N - look above
-  if (rs[idx - row_length]) sum++;
-  // S - look bellow
-  if (rs[idx + row_length]) sum++;
-  // W - look left
-  if (m > 0 && rs[idx - 1]) sum++;
-  // NW - look above left
-  if (m > 0 && rs[idx - row_length - 1]) sum++;
-  // NE - look above right
-  if ((m != row_length - 1) && rs[idx - row_length + 1]) sum++;
-  // E - look right
-  if ((m != row_length - 1) && rs[idx + 1]) sum++;
-  // SW - look bellow left
-  if (m > 0 && rs[idx + row_length - 1]) sum++;
-  // SE - look bellow right
-  if ((m != row_length - 1) && rs[idx + row_length + 1]) sum++;
-  
+
   return sum;
 }
 
-void gol_iteration_inner(std::vector<int>& rs, std::vector<int>& ns, int my_counts, int row_length, int start, int end) {
+void gol_iteration(std::vector<int>& rs, std::vector<int>& ns, int my_counts, int row_length, int start, int end) {
   // rs == localRows
   // count == how many rows do I have
   // row_length == row length
@@ -187,21 +152,6 @@ void print_field_ranks(std::vector<int>& field, int row_length, std::vector<int>
     }
     currrent_rank++;
   }
-#if DBG
-  printf("counts: ");
-  for (int i = 0; i < counts.size(); i++) {
-    printf("%d, ", counts[i]);
-  }
-  printf("\n");
-
-  printf("row length: %d\n", row_length);
-
-  printf("ranks: ");
-  for (int i = 0; i < ranks.size(); i++) {
-    printf("%d, ", ranks[i]);
-  }
-  printf("\n");
-#endif
 
   for (int i = 0; i < field.size(); i++) {
     if (i % row_length == 0) printf("%d: ", ranks[i / row_length]);
@@ -213,12 +163,12 @@ void print_field_ranks(std::vector<int>& field, int row_length, std::vector<int>
 int main(int argc, char** argv) {
   MPI_Init(&argc, &argv);
   
-  int row_length, row_count, iterations;
+  int row_length, row_count, iterations, rank, size;
   std::vector<int> field;
 
-  int size = mpiGetCommSize(MPI_COMM_WORLD);
-  int rank = mpiGetCommRank(MPI_COMM_WORLD);
-  
+  MPI_Comm_rank(MPI_COMM_WORLD, &rank);
+  MPI_Comm_size(MPI_COMM_WORLD, &size);
+
   if (rank == MPI_ROOT_RANK) {
     if (argc == 3) {
       std::string file_path = argv[1];
@@ -244,17 +194,11 @@ int main(int argc, char** argv) {
   MPI_Bcast(&row_length, 1, MPI_INT, MPI_ROOT_RANK, MPI_COMM_WORLD);
   MPI_Bcast(&row_count, 1, MPI_INT, MPI_ROOT_RANK, MPI_COMM_WORLD);
 
-  int row_size = row_count / size;
-  int row_rema = row_count % size;
-
-#if DBG
-  if (rank == 0) printf("row_size: %d row_count: %d row_rema: %d size: %d\n", row_size, row_count, row_rema, size);
-#endif
-
   std::vector<int> counts(size), displacements(size);
-  std::fill_n(displacements.data(), size, 0);
+  displacements[0] = 0;
 
   // compute the counts and displacements for MPI_Scatterv and MPI_Gatherv
+  int row_size = row_count / size, row_rema = row_count % size;
   for (int i = 0; i < size; i++) {
     counts[i] = row_size * row_length;
     if (i < row_rema) counts[i] += row_length;
@@ -262,133 +206,52 @@ int main(int argc, char** argv) {
   for (int i = 1; i < size; i++) {
     displacements[i] = displacements[i-1] + counts[i-1];
   }
-#if DBG
-  if (rank == 0) {
-    for (int i = 0; i < size; i++) {
-      printf("%d ", counts[i]);
-    }
-    printf("\n");
-
-    for (int i = 0; i < size; i++) {
-      printf("%d ", displacements[i]);
-    }
-    printf("\n");
-  }
-#endif
 
   std::vector<int> local_rows(counts[rank] + (2 * row_length)), next_state(counts[rank] + (2 * row_length));
-
   MPI_Scatterv(field.data(), counts.data(), displacements.data(), MPI_INT, local_rows.data() + row_length, counts[rank], MPI_INT, MPI_ROOT_RANK, MPI_COMM_WORLD);
-  
+
   // saving requests for async sending and then waiting
   auto requests = std::make_unique<MPI_Request[]>(4);
 
   for (int i = 0; i < iterations; i++) {
     // send up
-    if (rank > MPI_ROOT_RANK) {
-      MPI_Isend(local_rows.data() + row_length, row_length, MPI_INT, ABOVE_RANK, TO_ABOVE, MPI_COMM_WORLD, &requests[TO_ABOVE_REQUEST]);
-    } else {
-      requests[TO_ABOVE_REQUEST] = MPI_REQUEST_NULL;
-    }
-
+    MPI_Isend(local_rows.data() + row_length, row_length, MPI_INT, ABOVE_RANK, TO_ABOVE, MPI_COMM_WORLD, &requests[TO_ABOVE_REQUEST]);
     // send down
-    if (rank < size - 1) {
-      MPI_Isend(local_rows.data() + counts[rank], row_length, MPI_INT, BELLOW_RANK, TO_BELLOW, MPI_COMM_WORLD, &requests[TO_BELLOW_REQUEST]);
-    } else {
-      requests[TO_BELLOW_REQUEST] = MPI_REQUEST_NULL;
-    }
+    MPI_Isend(local_rows.data() + counts[rank], row_length, MPI_INT, BELLOW_RANK, TO_BELLOW, MPI_COMM_WORLD, &requests[TO_BELLOW_REQUEST]);
 
     // calculate the centers if thickness is >= 5
     if (counts[rank] >= COMM_OVERLAY_THRESHOLD * row_length) {
       int start = row_length * 2;
       int end = counts[rank];
-#if DBG
-      if (rank == 0) printf("#0 start: %d  end: %d\n", start, end);
-#endif
-      gol_iteration_inner(local_rows, next_state, counts[rank], row_length, start, end);
+      gol_iteration(local_rows, next_state, counts[rank], row_length, start, end);
     }
 
     // receive from above me
-    if (rank > 0) {
-      MPI_Irecv(local_rows.data(), row_length, MPI_INT, ABOVE_RANK, FROM_ABOVE, MPI_COMM_WORLD, &requests[FROM_ABOVE_REQUEST]);
-    } else {
-      requests[FROM_ABOVE_REQUEST] = MPI_REQUEST_NULL;
-    }
-
+    MPI_Irecv(local_rows.data(), row_length, MPI_INT, ABOVE_RANK, FROM_ABOVE, MPI_COMM_WORLD, &requests[FROM_ABOVE_REQUEST]);
     // receive from bellow me
-    if (rank < size - 1) {
-      MPI_Irecv(local_rows.data() + counts[rank] + row_length, row_length, MPI_INT, BELLOW_RANK, FROM_BELLOW, MPI_COMM_WORLD, &requests[FROM_BELLOW_REQUEST]);
+    MPI_Irecv(local_rows.data() + counts[rank] + row_length, row_length, MPI_INT, BELLOW_RANK, FROM_BELLOW, MPI_COMM_WORLD, &requests[FROM_BELLOW_REQUEST]);
+  
+    MPI_Waitall(4, requests.get(), MPI_STATUSES_IGNORE);
+
+    
+    int start, end;
+    if (counts[rank] >= COMM_OVERLAY_THRESHOLD * row_length) {
+      // if the tile is thick enough, there are two remaining areas
+      start = row_length;
+      end = row_length * 2;
+      gol_iteration(local_rows, next_state, counts[rank], row_length, start, end);
+
+      start = counts[rank];
+      end = counts[rank] + row_length;
+      gol_iteration(local_rows, next_state, counts[rank], row_length, start, end);
     } else {
-      requests[FROM_BELLOW_REQUEST] = MPI_REQUEST_NULL;
+      // if the tile is too small, do the entire area
+      start = row_length;
+      end = counts[rank] + row_length;
+      gol_iteration(local_rows, next_state, counts[rank], row_length, start, end);
     }
 
-  MPI_Waitall(4, requests.get(), MPI_STATUSES_IGNORE);
-
-#if DBG
-  if (rank == 0) {
-    printf("[%d] local rows:\n", rank);
-    for (int n = 0; n < counts[rank] + (2 * row_length); n++) {
-      printf("(%d, %d)", local_rows[n], next_state[n]);
-      if (n % row_length == row_length - 1) printf("\n");
-    }
-    printf("\n");
-  }
-#endif
-
-  int start, end;
-  if (counts[rank] >= COMM_OVERLAY_THRESHOLD * row_length) {
-    start = row_length;
-    end = row_length * 2;
-#if DBG
-    if (rank == 0) printf("#1 start: %d  end: %d\n", start, end);
-#endif
-    gol_iteration_inner(local_rows, next_state, counts[rank], row_length, start, end);
-
-    start = counts[rank];
-    end = counts[rank] + row_length;
-#if DBG
-    if (rank == 0) printf("#2 start: %d  end: %d\n", start, end);
-#endif
-    gol_iteration_inner(local_rows, next_state, counts[rank], row_length, start, end);
-  } else {
-    start = row_length;
-    end = counts[rank] + row_length;
-#if DBG
-    if (rank == 0) printf("start: %d  end: %d\n", start, end);
-#endif
-    gol_iteration_inner(local_rows, next_state, counts[rank], row_length, start, end);
-  }
-
-#if DBG
-  if (rank == 0) {
-    printf("[%d] next state:\n", rank);
-    for (int n = 0; n < counts[rank] + (2 * row_length); n++) {
-      printf("(%d, %d)", local_rows[n], next_state[n]);
-      if (n % row_length == row_length - 1) printf("\n");
-    }
-    printf("\n");
-  }
-#endif
-
-  gol_next_state(local_rows, next_state, counts[rank], row_length);
-
-  // if (rank == 0) {
-  //   printf("[%d] next state:\n", rank);
-  //   for (int n = 0; n < counts[rank] + (2 * row_length); n++) {
-  //     printf("(%d, %d)", local_rows[n], next_state[n]);
-  //     if (n % row_length == row_length - 1) printf("\n");
-  //   }
-  //   printf("\n");
-  // }
-
-  //   if (rank == 0) {
-  //   printf("[%d] next state local rows:\n", rank);
-  //   for (int n=0; n < counts[rank] + (2 * row_length); n++) {
-  //     printf("%d ", local_rows[n]);
-  //     if (n % row_length == row_length - 1) printf("\n");
-  //   }
-  //   printf("\n");
-  // }
+    gol_next_state(local_rows, next_state, counts[rank], row_length);
   }
 
   MPI_Gatherv(local_rows.data() + row_length, counts[rank], MPI_INT, field.data(), counts.data(), displacements.data(), MPI_INT, MPI_ROOT_RANK, MPI_COMM_WORLD);
@@ -396,11 +259,6 @@ int main(int argc, char** argv) {
   if (rank == MPI_ROOT_RANK) {
     print_field_ranks(field, row_length, counts);
   }
-  // printf("counts: ");
-  // for (int i = 0; i < counts.size(); i++) {
-  //   printf("%d, ", counts[i]);
-  // }
-  // printf("\n");
 
   MPI_Finalize();
 }
